@@ -1,0 +1,46 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SenderEmail",
+    "ParameterValue": "example@email.com"
+  },
+  {
+    "ParameterKey": "ReceiverEmail",
+    "ParameterValue": "example@email.com"
+  },
+  {
+    "ParameterKey": "BucketName",
+    "ParameterValue": "buisnesspennybucket"
+  },
+  {
+    "ParameterKey": "AthenaDatabase",
+    "ParameterValue": "athenacurcfn_mybillingreport"
+  },
+  {
+    "ParameterKey": "AthenaTable",
+    "ParameterValue": "mybillingreport"
+  },
+  {
+    "ParameterKey": "ScheduleExpression",
+    "ParameterValue": "cron(07 1 * ? * *)"
+  },
+  {
+    "ParameterKey": "QueryName",
+    "ParameterValue": "account_monthly_bill"
+  },
+  {
+    "ParameterKey": "QueryType",
+    "ParameterValue": "finops_bill"
+  },
+  {
+    "ParameterKey": "LambdaCodeS3Bucket",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "LambdaCodeS3Key",
+    "ParameterValue": "lambda/athena-query-lambda.zip"
+  }
+]

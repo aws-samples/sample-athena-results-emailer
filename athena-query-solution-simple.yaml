@@ -1,0 +1,293 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Simple Athena Query Lambda Solution - All-in-one template with inline code'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: ''
+    Description: Environment suffix for resource names
+  
+  SenderEmail:
+    Type: String
+    Default: 'example@email.com'
+    Description: Email address for sending notifications (must be verified in SES)
+  
+  ReceiverEmail:
+    Type: String
+    Default: 'example@email.com'
+    Description: Email address for receiving notifications (must be verified in SES)
+  
+  BucketName:
+    Type: String
+    Default: athena-query-results
+    Description: Athena Query
+
+  CURBucketArn:
+    Type: String
+    Description: Bucket the CUR is stored in ARN
+  
+  AthenaDatabase:
+    Type: String
+    Default: 'athenacurcfn_mybillingreport'
+    Description: Athena database name
+  
+  AthenaTable:
+    Type: String
+    Default: 'mybillingreport'
+    Description: Athena table name
+  
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(07 1 * ? * *)'
+    Description: CloudWatch Events schedule expression (daily at 1:07 AM)
+  
+  QueryName:
+    Type: String
+    Default: 'account_monthly_bill'
+    Description: Name for the query execution
+
+Resources:
+  # S3 Bucket for Athena results
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${BucketName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: Penny
+        - Key: Team
+          Value: FinOps
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'athena-query-lambda-role${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AthenaQueryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'athena:BatchGetQueryExecution'
+                  - 'athena:GetQueryExecution'
+                  - 'athena:GetQueryResults'
+                  - 'athena:StartQueryExecution'
+                  - 'athena:StopQueryExecution'
+                  - 'athena:ListQueryExecutions'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:ListMultipartUploadParts'
+                  - 's3:AbortMultipartUpload'
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl'
+                Resource:
+                  - !Sub '${CURBucketArn}'
+                  - !Sub '${CURBucketArn}/*'
+                  - !GetAtt ResultsBucket.Arn
+                  - !Sub '${ResultsBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'ses:SendEmail'
+                  - 'ses:SendRawEmail'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetTable'
+                  - 'glue:GetPartitions'
+                Resource: '*'
+
+  # Lambda Function with inline code
+  AthenaQueryLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'athena_query${Environment}'
+      Description: 'Scheduled Athena query execution with email notifications'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          SENDEREMAIL: !Ref SenderEmail
+          RECIVEREMAIL: !Ref ReceiverEmail
+      Code:
+        ZipFile: |
+          import boto3
+          import time
+          import json
+          import os
+          from datetime import datetime
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+          from email.mime.application import MIMEApplication
+
+          # AWS clients
+          athena = boto3.client('athena')
+          ses = boto3.client('ses')
+          
+          def lambda_handler(event, context):
+              query = event['Query']
+              database = event['Database']
+              query_name = event['Query_Name']
+              bucket = event['Bucket']
+              
+              # Start query
+              response = athena.start_query_execution(
+                  QueryString=query,
+                  QueryExecutionContext={'Database': database},
+                  ResultConfiguration={'OutputLocation': f's3://{bucket}/athena/{query_name}'}
+              )
+              query_id = response['QueryExecutionId']
+              
+              # Wait for completion
+              while True:
+                  result = athena.get_query_execution(QueryExecutionId=query_id)
+                  status = result['QueryExecution']['Status']['State']
+                  if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+                      break
+                  time.sleep(5)
+              
+              if status != 'SUCCEEDED':
+                  raise Exception(f'Query failed: {status}')
+              
+              # Get results
+              results = athena.get_query_results(QueryExecutionId=query_id)
+              rows = results['ResultSet']['Rows']
+              
+              # Create email
+              msg = MIMEMultipart()
+              msg['Subject'] = f'Athena Results: {query_name}'
+              msg['From'] = os.environ['SENDEREMAIL']
+              msg['To'] = os.environ['RECIVEREMAIL']
+              
+              if len(rows) > 1:  # Has data (first row is headers)
+                  # Create CSV content
+                  csv_lines = []
+                  for row in rows:
+                      line = [col.get('VarCharValue', '') for col in row['Data']]
+                      csv_lines.append(','.join(f'"{cell}"' for cell in line))
+                  csv_content = '\n'.join(csv_lines)
+                  
+                  # Add body
+                  msg.attach(MIMEText('Please find attached the query results.'))
+                  
+                  # Add CSV attachment
+                  filename = f"{query_name}_{datetime.now().strftime('%Y-%m-%d')}.csv"
+                  attachment = MIMEApplication(csv_content.encode('utf-8'))
+                  attachment.add_header('Content-Disposition', 'attachment', filename=filename)
+                  msg.attach(attachment)
+              else:
+                  # No results
+                  msg.attach(MIMEText('Query completed but returned no results.'))
+              
+              # Send email
+              ses.send_raw_email(
+                  Source=os.environ['SENDEREMAIL'],
+                  Destinations=[os.environ['RECIVEREMAIL']],
+                  RawMessage={'Data': msg.as_string()}
+              )
+              
+              return {'statusCode': 200, 'body': f'Query {query_name} completed'}
+
+      Tags:
+        - Key: Team
+          Value: FinOps
+        - Key: Project
+          Value: Penny
+
+  # CloudWatch Event Rule
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'finops_bill_${QueryName}${Environment}'
+      Description: 'Scheduled rule for Athena query execution'
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AthenaQueryLambda.Arn
+          Id: !Sub '${QueryName}${Environment}'
+          Input: !Sub |
+            {
+              "Query": "SELECT * FROM athenacurcfn_mybillingreport.mybillingreport limit 10",
+              "Database": "${AthenaDatabase}${Environment}",
+              "Query_Name": "${QueryName}",
+              "Bucket": "${BucketName}-${AWS::AccountId}",
+              "Env": "${Environment}",
+              "Query_Type": "finops_bill"
+            }
+
+  # Lambda Permission for CloudWatch Events
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AthenaQueryLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledRule.Arn
+
+  # CloudWatch Alarm for Lambda Errors
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AthenaQueryLambda}_error_alarm'
+      AlarmDescription: !Sub 'Monitors errors for ${AthenaQueryLambda} lambda function'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AthenaQueryLambda
+      TreatMissingData: notBreaching
+
+Outputs:
+  LambdaFunctionArn:
+    Description: 'ARN of the Athena Query Lambda function'
+    Value: !GetAtt AthenaQueryLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+  
+  S3BucketName:
+    Description: 'Name of the S3 bucket for Athena results'
+    Value: !Ref ResultsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ResultsBucket'
+  
+  EventRuleName:
+    Description: 'Name of the CloudWatch Event Rule'
+    Value: !Ref ScheduledRule
+    Export:
+      Name: !Sub '${AWS::StackName}-EventRule'
+  
+  NextSteps:
+    Description: 'Important next steps'
+    Value: 'Verify SES email addresses and test the Lambda function'

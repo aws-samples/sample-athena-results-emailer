@@ -1,0 +1,368 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Advanced Athena Query Lambda Solution - Scheduled Athena queries with email notifications using Lambda Layers'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: ''
+    Description: Environment suffix for resource names
+  
+  SenderEmail:
+    Type: String
+    Default: 'example@email.com'
+    Description: Email address for sending notifications
+  
+  ReceiverEmail:
+    Type: String
+    Default: 'example@email.com'
+    Description: Email address for receiving notifications
+  
+  BucketName:
+    Type: String
+    Default: 'buisnesspennybucket'
+    Description: Base name for S3 bucket (account ID will be appended)
+  
+  AthenaDatabase:
+    Type: String
+    Default: 'athenacurcfn_mybillingreport'
+    Description: Athena database name
+  
+  AthenaTable:
+    Type: String
+    Default: 'mybillingreport'
+    Description: Athena table name
+  
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(07 1 * ? * *)'
+    Description: CloudWatch Events schedule expression for running the query
+  
+  QueryName:
+    Type: String
+    Default: 'account_monthly_bill'
+    Description: Name for the query execution
+  
+  QueryType:
+    Type: String
+    Default: 'finops_bill'
+    AllowedValues:
+      - 'finops_bill'
+      - 'finops_report'
+    Description: Type of query being executed
+  
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket containing the Lambda deployment package
+    Default: ''
+  
+  LambdaCodeS3Key:
+    Type: String
+    Description: S3 key for the Lambda deployment package
+    Default: 'lambda/athena-query-lambda.zip'
+
+Conditions:
+  UseS3Code: !Not [!Equals [!Ref LambdaCodeS3Bucket, '']]
+
+Resources:
+  # S3 Bucket for Athena results
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${BucketName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: Penny
+        - Key: Team
+          Value: FinOps
+
+  # S3 Bucket Policy for AWS Billing Service
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowBillingServiceAccess
+            Effect: Allow
+            Principal:
+              AWS: 'arn:aws:iam::386209384616:root'
+            Action:
+              - 's3:GetBucketAcl'
+              - 's3:GetBucketPolicy'
+            Resource: !GetAtt S3Bucket.Arn
+          - Sid: AllowBillingServicePutObject
+            Effect: Allow
+            Principal:
+              AWS: 'arn:aws:iam::386209384616:root'
+            Action:
+              - 's3:PutObject'
+            Resource: !Sub '${S3Bucket.Arn}/*'
+
+  # Lambda Layer for Python dependencies
+  PythonDependenciesLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub 'athena-query-dependencies${Environment}'
+      Description: 'Python dependencies for Athena Query Lambda'
+      Content:
+        ZipFile: |
+          # This is a placeholder. In practice, you would upload a proper layer
+          # containing the tenacity package and other dependencies
+      CompatibleRuntimes:
+        - python3.9
+        - python3.8
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'athena-query-lambda-role${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AthenaQueryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'athena:BatchGetQueryExecution'
+                  - 'athena:GetQueryExecution'
+                  - 'athena:GetQueryResults'
+                  - 'athena:GetQueryResultsStream'
+                  - 'athena:StartQueryExecution'
+                  - 'athena:StopQueryExecution'
+                  - 'athena:ListQueryExecutions'
+                  - 'athena:GetDatabase'
+                  - 'athena:GetDataCatalog'
+                  - 'athena:GetTableMetadata'
+                  - 'athena:ListDatabases'
+                  - 'athena:ListTableMetadata'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'athena:GetWorkGroup'
+                  - 'athena:BatchGetQueryExecution'
+                  - 'athena:GetQueryExecution'
+                  - 'athena:GetQueryResults'
+                  - 'athena:StartQueryExecution'
+                Resource: 
+                  - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/primary'
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:ListMultipartUploadParts'
+                  - 's3:AbortMultipartUpload'
+                  - 's3:CreateBucket'
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl'
+                Resource:
+                  - !GetAtt S3Bucket.Arn
+                  - !Sub '${S3Bucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'ses:SendEmail'
+                  - 'ses:SendRawEmail'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetTable'
+                  - 'glue:GetPartitions'
+                  - 'glue:GetDatabases'
+                  - 'glue:GetTables'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+  # Lambda Function
+  AthenaQueryLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'athena_query${Environment}'
+      Description: 'Scheduled Athena query execution with email notifications'
+      Runtime: python3.9
+      Handler: lambda.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 500
+      MemorySize: 600
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          SENDEREMAIL: !Ref SenderEmail
+          RECIVEREMAIL: !Ref ReceiverEmail
+      Layers:
+        - !Ref PythonDependenciesLayer
+      Code: !If
+        - UseS3Code
+        - S3Bucket: !Ref LambdaCodeS3Bucket
+          S3Key: !Ref LambdaCodeS3Key
+        - ZipFile: |
+            import json
+            import logging
+            
+            def lambda_handler(event, context):
+                logger = logging.getLogger()
+                logger.setLevel(logging.INFO)
+                logger.info("Lambda function started")
+                logger.info(f"Event: {json.dumps(event)}")
+                
+                # Placeholder implementation
+                # In production, upload the full code as a deployment package
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps('Placeholder function - upload full code package')
+                }
+      Tags:
+        - Key: Team
+          Value: FinOps
+        - Key: Project
+          Value: Penny
+
+  # CloudWatch Event Rule
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${QueryType}_${QueryName}${Environment}'
+      Description: 'Scheduled rule for Athena query execution'
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AthenaQueryLambda.Arn
+          Id: !Sub '${QueryName}${Environment}'
+          Input: !Sub |
+            {
+              "Query": "SELECT \"line_item_usage_account_id\", round(sum(\"line_item_unblended_cost\"), 2) AS cost FROM \"${AthenaDatabase}${Environment}\".\"${AthenaTable}\" WHERE if((date_format(current_timestamp , '%M') = 'January'),month = '12', month = CAST((month(now())-1) AS VARCHAR) ) AND if((date_format(current_timestamp , '%M') = 'January'), year = CAST((year(now())-1) AS VARCHAR) ,year = CAST(year(now()) AS VARCHAR)) AND line_item_usage_account_id LIKE '123444%' GROUP BY line_item_usage_account_id;",
+              "Email": "${ReceiverEmail}",
+              "Database": "${AthenaDatabase}${Environment}",
+              "Query_Name": "${QueryName}",
+              "Bucket": "${S3Bucket}",
+              "Env": "${Environment}",
+              "GCP_Project": "",
+              "Query_Type": "${QueryType}"
+            }
+
+  # Lambda Permission for CloudWatch Events
+  LambdaInvokePermissionBill:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AthenaQueryLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/finops_bill_*'
+
+  LambdaInvokePermissionReport:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AthenaQueryLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/finops_report_*'
+
+  LambdaInvokePermissionSpecific:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AthenaQueryLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledRule.Arn
+
+  # CloudWatch Alarm for Lambda Errors
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AthenaQueryLambda}_lambda_error_alarm'
+      AlarmDescription: !Sub 'This metric alarm monitors the errors for the ${AthenaQueryLambda} lambda function'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Minimum
+      Period: 10800
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AthenaQueryLambda
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for Lambda Duration
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AthenaQueryLambda}_lambda_duration_alarm'
+      AlarmDescription: !Sub 'This metric alarm monitors the duration for the ${AthenaQueryLambda} lambda function'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 450000  # 450 seconds (90% of 500 second timeout)
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AthenaQueryLambda
+      TreatMissingData: notBreaching
+
+Outputs:
+  LambdaFunctionArn:
+    Description: 'ARN of the Athena Query Lambda function'
+    Value: !GetAtt AthenaQueryLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+  
+  LambdaFunctionName:
+    Description: 'Name of the Athena Query Lambda function'
+    Value: !Ref AthenaQueryLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaName'
+  
+  S3BucketName:
+    Description: 'Name of the S3 bucket for Athena results'
+    Value: !Ref S3Bucket
+    Export:
+      Name: !Sub '${AWS::StackName}-S3Bucket'
+  
+  S3BucketArn:
+    Description: 'ARN of the S3 bucket for Athena results'
+    Value: !GetAtt S3Bucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-S3BucketArn'
+  
+  EventRuleName:
+    Description: 'Name of the CloudWatch Event Rule'
+    Value: !Ref ScheduledRule
+    Export:
+      Name: !Sub '${AWS::StackName}-EventRule'
+  
+  EventRuleArn:
+    Description: 'ARN of the CloudWatch Event Rule'
+    Value: !GetAtt ScheduledRule.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-EventRuleArn'
+  
+  LambdaLayerArn:
+    Description: 'ARN of the Lambda Layer for dependencies'
+    Value: !Ref PythonDependenciesLayer
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaLayer'
