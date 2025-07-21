@@ -13,12 +13,15 @@ We'll build a system that:
 
 **Total Setup Time:** ~20-30 minutes
 
+**PreRec**
+CUR has been setup
+
 ---
 
 ## Step 1: Setup SES (Simple Email Service)
 
 ### 1.1 Verify Email Addresses
-1. Navigate to **SES Console** → **Verified identities**
+1. Navigate to **SES Console** → **Identities**
 2. Click **Create identity**
 3. Select **Email address**
 4. Enter your sender email (e.g., `billing-reports@company.com`)
@@ -140,7 +143,7 @@ We'll build a system that:
 2. Click **Create function**
 3. **Author from scratch**
 4. Function name: `athena_query`
-5. Runtime: **Python 3.9**
+5. Runtime: **Python 3.11**
 6. **Execution role**: Use existing role → `athena-query-lambda-role`
 7. Click **Create function**
 
@@ -274,10 +277,10 @@ def lambda_handler(event, context):
 5. **JSON**: 
 ```json
 {
-  "Query": "SELECT * FROM athenacurcfn_mybillingreport.mybillingreport LIMIT 10",
-  "Database": "athenacurcfn_mybillingreport",
+  "Query": "SELECT * FROM YOUR-DATABASE LIMIT 10",
+  "Database": "YOUR-DATABASE",
   "Query_Name": "account_monthly_bill",
-  "Bucket": "athena-query-results-123456789012",
+  "Bucket": "athena-query-results-111222333",
   "Env": "",
   "Query_Type": "finops_bill"
 }
@@ -286,7 +289,7 @@ def lambda_handler(event, context):
 7. Click **Create rule**
 
 **Demo Tip:** Explain cron expressions and show how to modify for different schedules.
-
+USE Q to improve logging?????
 **Common Gotcha:** Update the bucket name and database name to match your actual values.
 
 ---
