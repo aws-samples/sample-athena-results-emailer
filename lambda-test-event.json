@@ -1,0 +1,7 @@
+{
+  "Database": "athenacurcfn_mybillingreport",
+  "Table": "mybillingreport",
+  "Query_Name": "cost_optimization_test",
+  "Bucket": "athena-query-results-123456789012",
+  "Environment": "test"
+}

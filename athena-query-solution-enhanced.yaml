@@ -1,0 +1,422 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Enhanced Athena Query Lambda Solution with Cost Optimization Hub and M&M Metrics'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: ''
+    Description: Environment suffix for resource names
+  
+  SenderEmail:
+    Type: String
+    Default: 'example@email.com'
+    Description: Email address for sending notifications (must be verified in SES)
+  
+  ReceiverEmail:
+    Type: String
+    Default: 'example@email.com'
+    Description: Email address for receiving notifications (must be verified in SES)
+  
+  BucketName:
+    Type: String
+    Default: athena-query-results
+    Description: Athena Query Results Bucket Name
+
+  CURBucketArn:
+    Type: String
+    Description: Bucket the CUR is stored in ARN
+  
+  AthenaDatabase:
+    Type: String
+    Default: 'athenacurcfn_mybillingreport'
+    Description: Athena database name
+  
+  AthenaTable:
+    Type: String
+    Default: 'mybillingreport'
+    Description: Athena table name
+  
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(0 9 ? * MON *)'
+    Description: CloudWatch Events schedule expression (Mondays at 9 AM)
+  
+  QueryName:
+    Type: String
+    Default: 'weekly_cost_optimization_report'
+    Description: Name for the query execution
+
+Resources:
+  # S3 Bucket for Athena results
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${BucketName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: Penny
+        - Key: Team
+          Value: FinOps
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'enhanced-athena-lambda-role${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EnhancedAthenaQueryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'athena:*'
+                  - 'cost-optimization-hub:ListRecommendations'
+                  - 'cost-optimization-hub:GetRecommendation'
+                  - 'cost-optimization-hub:ListEnrollmentStatuses'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:ListMultipartUploadParts'
+                  - 's3:AbortMultipartUpload'
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl'
+                Resource:
+                  - !Sub '${CURBucketArn}'
+                  - !Sub '${CURBucketArn}/*'
+                  - !GetAtt ResultsBucket.Arn
+                  - !Sub '${ResultsBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'ses:SendEmail'
+                  - 'ses:SendRawEmail'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetTable'
+                  - 'glue:GetPartitions'
+                Resource: '*'
+
+  # Enhanced Lambda Function
+  EnhancedAthenaQueryLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'enhanced_athena_query${Environment}'
+      Description: 'Enhanced Athena query with Cost Optimization Hub and M&M metrics'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 600
+      MemorySize: 1024
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          SENDEREMAIL: !Ref SenderEmail
+          RECIVEREMAIL: !Ref ReceiverEmail
+      Code:
+        ZipFile: |
+          import boto3
+          import time
+          import json
+          import os
+          from datetime import datetime, timedelta
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+
+          # AWS clients
+          athena = boto3.client('athena')
+          ses = boto3.client('ses')
+          cost_hub = boto3.client('cost-optimization-hub')
+          
+          def lambda_handler(event, context):
+              # Get weekly spend data
+              spend_data = get_weekly_spend(event)
+              
+              # Get Cost Optimization Hub recommendations
+              recommendations = get_cost_optimization_recommendations()
+              
+              # Generate and send enhanced email
+              send_enhanced_email(spend_data, recommendations, event['Query_Name'])
+              
+              return {'statusCode': 200, 'body': 'Enhanced cost report sent successfully'}
+          
+          def get_weekly_spend(event):
+              query = f"""
+              SELECT 
+                  line_item_usage_start_date,
+                  product_servicename,
+                  SUM(line_item_unblended_cost) as daily_cost
+              FROM {event['Database']}.{event.get('Table', 'mybillingreport')}
+              WHERE line_item_usage_start_date >= date_add('day', -7, current_date)
+              GROUP BY line_item_usage_start_date, product_servicename
+              ORDER BY line_item_usage_start_date DESC, daily_cost DESC
+              """
+              
+              response = athena.start_query_execution(
+                  QueryString=query,
+                  QueryExecutionContext={'Database': event['Database']},
+                  ResultConfiguration={'OutputLocation': f"s3://{event['Bucket']}/athena/{event['Query_Name']}"}
+              )
+              
+              query_id = response['QueryExecutionId']
+              
+              # Wait for completion
+              while True:
+                  result = athena.get_query_execution(QueryExecutionId=query_id)
+                  status = result['QueryExecution']['Status']['State']
+                  if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+                      break
+                  time.sleep(5)
+              
+              if status != 'SUCCEEDED':
+                  return {'total_cost': 0, 'services': {}}
+              
+              results = athena.get_query_results(QueryExecutionId=query_id)
+              rows = results['ResultSet']['Rows'][1:]  # Skip header
+              
+              total_cost = 0
+              services = {}
+              
+              for row in rows:
+                  service = row['Data'][1].get('VarCharValue', 'Unknown')
+                  cost = float(row['Data'][2].get('VarCharValue', '0'))
+                  total_cost += cost
+                  services[service] = services.get(service, 0) + cost
+              
+              return {
+                  'total_cost': total_cost,
+                  'services': dict(sorted(services.items(), key=lambda x: x[1], reverse=True)[:5]) if services else {}
+              }
+          
+          def get_cost_optimization_recommendations():
+              try:
+                  # Exclude RI and SP recommendations
+                  response = cost_hub.list_recommendations(
+                      filter={
+                          'actionTypes': ['Rightsize', 'Stop', 'Upgrade'],
+                          'implementationEfforts': ['VeryLow', 'Low', 'Medium', 'High']
+                      },
+                      maxResults=50
+                  )
+                  
+                  recommendations = []
+                  total_savings = 0
+                  
+                  for rec in response.get('items', []):
+                      if rec.get('actionType') not in ['PurchaseReservedInstances', 'PurchaseSavingsPlans']:
+                          savings = float(rec.get('estimatedMonthlySavings', 0))
+                          total_savings += savings
+                          recommendations.append({
+                              'action': rec.get('actionType', 'Unknown'),
+                              'effort': rec.get('implementationEffort', 'Unknown'),
+                              'savings': savings,
+                              'resource': rec.get('resourceId', 'Unknown')[:20] + '...'
+                          })
+                  
+                  return {
+                      'total_savings': total_savings,
+                      'recommendations': sorted(recommendations, key=lambda x: x['savings'], reverse=True)[:10]
+                  }
+              except Exception as e:
+                  print(f"Error getting recommendations: {e}")
+                  return {'total_savings': 0, 'recommendations': []}
+          
+          def calculate_mms(amount):
+              # Average M&M pack costs $1.25
+              mm_packs = int(amount / 1.25)
+              return f"{mm_packs:,} packs of M&Ms"
+          
+          def get_achievement_level(savings):
+              if savings >= 1000:
+                  return "🏆 COST OPTIMIZATION CHAMPION"
+              elif savings >= 500:
+                  return "🥇 SAVINGS SUPERSTAR"
+              elif savings >= 100:
+                  return "🥈 EFFICIENCY EXPERT"
+              elif savings >= 50:
+                  return "🥉 BUDGET BUDDY"
+              else:
+                  return "🌱 OPTIMIZATION ROOKIE"
+          
+          def send_enhanced_email(spend_data, recommendations, query_name):
+              msg = MIMEMultipart()
+              msg['Subject'] = f"🍫 Weekly AWS Cost Report - {datetime.now().strftime('%B %d, %Y')}"
+              msg['From'] = os.environ['SENDEREMAIL']
+              msg['To'] = os.environ['RECIVEREMAIL']
+              
+              # Create HTML email content
+              html_content = f"""
+              <html>
+              <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                  <h1 style="color: #FF6B35;">🍫 Weekly AWS Cost Optimization Report</h1>
+                  
+                  <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                      <h2>📊 This Week's Spending Summary</h2>
+                      <p><strong>Total Weekly Spend:</strong> ${spend_data['total_cost']:.2f}</p>
+                      <p><strong>In M&M Terms:</strong> {calculate_mms(spend_data['total_cost'])}</p>
+                  </div>
+                  
+                  <div style="background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                      <h2>🎯 Cost Optimization Opportunities</h2>
+                      <p><strong>Potential Monthly Savings:</strong> ${recommendations['total_savings']:.2f}</p>
+                      <p><strong>M&M Equivalent:</strong> {calculate_mms(recommendations['total_savings'])}</p>
+                      <p><strong>Achievement Level:</strong> {get_achievement_level(recommendations['total_savings'])}</p>
+                  </div>
+                  
+                  <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                      <h2>🔧 Top Optimization Actions</h2>
+                      <ul>
+              """
+              
+              for rec in recommendations['recommendations'][:5]:
+                  html_content += f"""
+                      <li><strong>{rec['action']}</strong> ({rec['effort']} effort) - Save ${rec['savings']:.2f}/month ({calculate_mms(rec['savings'])})</li>
+                  """
+              
+              html_content += f"""
+                      </ul>
+                  </div>
+                  
+                  <div style="background: #d1ecf1; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                      <h2>💰 Top Spending Services</h2>
+                      <ul>
+              """
+              
+              for service, cost in list(spend_data['services'].items())[:5]:
+                  html_content += f"""
+                      <li><strong>{service}:</strong> ${cost:.2f} ({calculate_mms(cost)})</li>
+                  """
+              
+              html_content += f"""
+                      </ul>
+                  </div>
+                  
+                  <div style="background: #f8d7da; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                      <h2>🎮 Weekly Challenge</h2>
+                      <p>Can you implement at least one optimization recommendation this week? 
+                      Each action gets you closer to the next achievement level!</p>
+                  </div>
+                  
+                  <p style="font-size: 12px; color: #666; margin-top: 30px;">
+                      Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC<br>
+                      M&M calculations based on $1.25 per pack average price
+                  </p>
+              </body>
+              </html>
+              """
+              
+              msg.attach(MIMEText(html_content, 'html'))
+              
+              # Send email
+              ses.send_raw_email(
+                  Source=os.environ['SENDEREMAIL'],
+                  Destinations=[os.environ['RECIVEREMAIL']],
+                  RawMessage={'Data': msg.as_string()}
+              )             <h2>🎮 Weekly Challenge</h2>
+                      <p>Can you implement at least one optimization recommendation this week? 
+                      Each action gets you closer to the next achievement level!</p>
+                  </div>
+                  
+                  <p style="font-size: 12px; color: #666; margin-top: 30px;">
+                      Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC<br>
+                      M&M calculations based on $1.25 per pack average price
+                  </p>
+              </body>
+              </html>
+              """
+              
+              msg.attach(MIMEText(html_content, 'html'))
+              
+              # Send email
+              ses.send_raw_email(
+                  Source=os.environ['SENDEREMAIL'],
+                  Destinations=[os.environ['RECIVEREMAIL']],
+                  RawMessage={'Data': msg.as_string()}
+              )
+
+      Tags:
+        - Key: Team
+          Value: FinOps
+        - Key: Project
+          Value: Penny
+
+  # CloudWatch Event Rule for Monday mornings
+  WeeklyScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'enhanced_finops_report_${QueryName}${Environment}'
+      Description: 'Weekly enhanced cost optimization report'
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EnhancedAthenaQueryLambda.Arn
+          Id: !Sub '${QueryName}${Environment}'
+          Input: !Sub |
+            {
+              "Database": "${AthenaDatabase}${Environment}",
+              "Table": "${AthenaTable}",
+              "Query_Name": "${QueryName}",
+              "Bucket": "${BucketName}-${AWS::AccountId}",
+              "Env": "${Environment}",
+              "Query_Type": "enhanced_finops_report"
+            }
+
+  # Lambda Permission for CloudWatch Events
+  EnhancedLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EnhancedAthenaQueryLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyScheduledRule.Arn
+
+  # CloudWatch Alarm for Lambda Errors
+  EnhancedLambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnhancedAthenaQueryLambda}_error_alarm'
+      AlarmDescription: !Sub 'Monitors errors for ${EnhancedAthenaQueryLambda} lambda function'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref EnhancedAthenaQueryLambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+Outputs:
+  LambdaFunctionName:
+    Description: 'Name of the enhanced Lambda function'
+    Value: !Ref EnhancedAthenaQueryLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunction'
+  
+  S3BucketName:
+    Description: 'Name of the S3 bucket for Athena results'
+    Value: !Ref ResultsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-S3Bucket'

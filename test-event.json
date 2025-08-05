@@ -1,0 +1,8 @@
+{
+  "Database": "athenacurcfn_mybillingreport",
+  "Table": "mybillingreport",
+  "Query_Name": "weekly_cost_optimization_report",
+  "Bucket": "athena-query-results-123456789012",
+  "Env": "",
+  "Query_Type": "enhanced_finops_report"
+}

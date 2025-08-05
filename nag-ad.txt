@@ -1,0 +1,47 @@
+------------------------------------------------------------
+/Users/awssteph/Library/CloudStorage/WorkDocsDrive-Documents/CODE2/aws-github/sample-athena-results-emailer/athena-query-solution-advanced.yaml
+------------------------------------------------------------------------------------------------------------------------
+[33m| WARN W11[0m
+[33m|[0m
+[33m| Resource: ["LambdaExecutionRole"][0m
+[33m| Line Numbers: [124][0m
+[33m|[0m
+[33m| IAM role should not allow * resource on its permissions policy[0m
+------------------------------------------------------------
+[33m| WARN W89[0m
+[33m|[0m
+[33m| Resource: ["AthenaQueryLambda"][0m
+[33m| Line Numbers: [201][0m
+[33m|[0m
+[33m| Lambda functions should be deployed inside a VPC[0m
+------------------------------------------------------------
+[33m| WARN W92[0m
+[33m|[0m
+[33m| Resource: ["AthenaQueryLambda"][0m
+[33m| Line Numbers: [201][0m
+[33m|[0m
+[33m| Lambda functions should define ReservedConcurrentExecutions to reserve simultaneous executions[0m
+------------------------------------------------------------
+[33m| WARN W28[0m
+[33m|[0m
+[33m| Resource: ["LambdaErrorAlarm", "LambdaDurationAlarm", "LambdaExecutionRole"][0m
+[33m| Line Numbers: [293, 311, 124][0m
+[33m|[0m
+[33m| Resource found with an explicit name, this disallows updates that require replacement of this resource[0m
+------------------------------------------------------------
+[33m| WARN W35[0m
+[33m|[0m
+[33m| Resource: ["S3Bucket"][0m
+[33m| Line Numbers: [69][0m
+[33m|[0m
+[33m| S3 Bucket should have access logging configured[0m
+------------------------------------------------------------
+[33m| WARN W41[0m
+[33m|[0m
+[33m| Resource: ["S3Bucket"][0m
+[33m| Line Numbers: [69][0m
+[33m|[0m
+[33m| S3 Bucket should have encryption option set[0m
+
+Failures count: 0
+Warnings count: 8
